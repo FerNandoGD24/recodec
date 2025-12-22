@@ -72,7 +72,7 @@ sudo zypper install ffmpeg bash coreutils util-linux
 
 
 ```bash
-./recodec.sh *.mkv
+./recodec.sh *.mp4
 ```
 
 - Procesa solo archivos `.mp4` (no distingue mayúsculas/minúsculas).
@@ -82,7 +82,7 @@ sudo zypper install ffmpeg bash coreutils util-linux
 
 
 ```bash
-./recodec.sh *.mp4
+./recodec.sh *.mkv
 ```
 
 - Procesa solo archivos  `.mkv` (no distingue mayúsculas/minúsculas).
