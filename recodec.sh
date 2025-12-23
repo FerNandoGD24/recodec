@@ -62,12 +62,6 @@ get_audio_track_count() {
   ffprobe -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$1" 2>/dev/null | wc -l
 }
 
-get_audio_channels() {
-  local file="$1"
-  local index="$2"
-  ffprobe -v quiet -select_streams a:$index -show_entries stream=channels -of csv=p=0 "$file" 2>/dev/null
-}
-
 process_file() {
   local INPUT="$1"
   local EXT="${INPUT##*.}"
@@ -91,59 +85,52 @@ process_file() {
   audio_tracks=$(get_audio_track_count "$INPUT") 2>/dev/null || audio_tracks=0
 
   echo "Procesando: $INPUT (pistas de audio: $audio_tracks, hilos: $CPU_CORES)"
-  echo "  Salida: $OUTPUT"
-  echo -n "  Progreso: "
-
+  echo "  Salida de video: $OUTPUT"
   mkdir -p "$ARCHIVE_DIR"
 
-  local ffmpeg_args=(
-    -hide_banner -loglevel error -i "$INPUT"
-    -c:v dnxhd -profile:v dnxhr_sq -pix_fmt yuv422p
-    -map 0:v
-  )
-
-  local output_index=0
+  # 1. Extraer pistas de audio como .wav estéreo
+  local extracted_audio=()
+  local failed_audio=0
   for ((i=0; i<audio_tracks; i++)); do
-    local ch
-    ch=$(get_audio_channels "$INPUT" "$i") || ch=1
-    if ! [[ "$ch" =~ ^[0-9]+$ ]] || [ "$ch" -lt 1 ]; then
-      ch=1
-    fi
-
-    if [ "$ch" -eq 1 ]; then
-      # Pista mono: duplicar el mismo canal
-      ffmpeg_args+=(-map "0:a:$i" -map "0:a:$i")
-      ffmpeg_args+=(-filter:a:$((output_index++)) "pan=mono|c0=c0")
-      ffmpeg_args+=(-filter:a:$((output_index++)) "pan=mono|c0=c0")
-    elif [ "$ch" -ge 2 ]; then
-      # Pista estéreo o más: usar c0 y c1
-      ffmpeg_args+=(-map "0:a:$i" -map "0:a:$i")
-      ffmpeg_args+=(-filter:a:$((output_index++)) "pan=mono|c0=c0")
-      ffmpeg_args+=(-filter:a:$((output_index++)) "pan=mono|c0=c1")
+    local audio_output="$DIR/${BASENAME}_audio_track_${i}.wav"
+    echo "  Extrayendo pista de audio $i → $audio_output"
+    if ! run_ffmpeg_limited \
+        -hide_banner -loglevel error -i "$INPUT" \
+        -map "0:a:$i" \
+        -c:a pcm_s16le -ac 2 -ar 48000 \
+        -y "$audio_output" &>/dev/null; then
+      echo "    Error al extraer pista de audio $i"
+      ((failed_audio++))
     else
-      # Caso improbable, tratar como mono
-      ffmpeg_args+=(-map "0:a:$i" -map "0:a:$i")
-      ffmpeg_args+=(-filter:a:$((output_index++)) "pan=mono|c0=c0")
-      ffmpeg_args+=(-filter:a:$((output_index++)) "pan=mono|c0=c0")
+      extracted_audio+=("$audio_output")
     fi
   done
 
-  ffmpeg_args+=(
-    -c:a pcm_s16le -ar 48000
-    -f mov -y -progress pipe:1 "$OUTPUT"
-  )
-
-  if run_ffmpeg_limited "${ffmpeg_args[@]}" 2>/dev/null | show_percent "$INPUT"; then
-    if [ -f "$OUTPUT" ]; then
-      mv "$INPUT" "$ARCHIVE_DIR/" 2>/dev/null || true
-      echo "Listo: $OUTPUT"
-      return 0
-    fi
+  if [ "$failed_audio" -eq "$audio_tracks" ] && [ "$audio_tracks" -gt 0 ]; then
+    echo "  Todas las pistas de audio fallaron. Abortando."
+    return 1
   fi
 
-  echo
-  echo "Error: falló la conversión de $INPUT"
-  return 1
+  # 2. Codificar video SIN audio
+  echo -n "  Codificando video sin audio... "
+  if run_ffmpeg_limited \
+      -hide_banner -loglevel error -i "$INPUT" \
+      -c:v dnxhd -profile:v dnxhr_sq -pix_fmt yuv422p \
+      -an -f mov -y "$OUTPUT" &>/dev/null; then
+    echo "OK"
+  else
+    echo "Error"
+    # Limpiar archivos de audio si el video falla
+    for f in "${extracted_audio[@]}"; do
+      rm -f "$f"
+    done
+    return 1
+  fi
+
+  # Mover original
+  mv "$INPUT" "$ARCHIVE_DIR/" 2>/dev/null || true
+  echo "Listo: $OUTPUT y ${#extracted_audio[@]} pistas de audio .wav"
+  return 0
 }
 
 declare -A elapsed_times
@@ -188,10 +175,15 @@ for f in "${failed_files[@]}"; do
   BASENAME="${BASENAME%.*}"
   OUTPUT="$DIR/${BASENAME}.mov"
 
+  # Limpiar salidas parciales
   if [ -f "$OUTPUT" ]; then
     rm -f "$OUTPUT"
     echo "Eliminado archivo parcial: $OUTPUT"
   fi
+  # También borrar posibles .wav parciales
+  for wav in "$DIR/${BASENAME}_audio_track_"*.wav; do
+    [ -f "$wav" ] && rm -f "$wav"
+  done
 
   echo "Reintentando: $INPUT"
   START=$(date +%s)
@@ -228,6 +220,10 @@ for orig in "${successful_files[@]}"; do
     else
       echo "CORRUPTO"
       rm -f "$mov"
+      # Borrar .wav asociados
+      for wav in "$DIR/${BASENAME}_audio_track_"*.wav; do
+        [ -f "$wav" ] && rm -f "$wav"
+      done
       failed_files+=("$orig (corrupto tras conversión)")
     fi
   else
@@ -242,7 +238,7 @@ echo "RESUMEN FINAL"
 echo "==========================================="
 
 if [ ${#successful_files[@]} -gt 0 ]; then
-  echo -e "${GREEN}Archivos convertidos correctamente (${#successful_files[@]}):${NC}"
+  echo -e "${GREEN}Archivos procesados correctamente (${#successful_files[@]}):${NC}"
   for f in "${successful_files[@]}"; do
     if [[ -v elapsed_times["$f"] ]]; then
       echo -e "  $f (${elapsed_times["$f"]}s)"
@@ -251,7 +247,7 @@ if [ ${#successful_files[@]} -gt 0 ]; then
     fi
   done
 else
-  echo "Ningún archivo se convirtió correctamente."
+  echo "Ningún archivo se procesó correctamente."
 fi
 
 echo
@@ -267,4 +263,5 @@ fi
 
 echo
 echo "Los archivos originales procesados se guardaron en la carpeta 'input/'."
+echo "Los archivos de audio se guardaron como 'nombre_audio_track_N.wav'."
 echo "Conversión completada."
