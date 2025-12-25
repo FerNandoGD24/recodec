@@ -3,9 +3,12 @@
 Convierte archivos de video `.mp4` o `.mkv` a formato `.mov` compatible con DaVinci Resolve en Linux,  
 usando DNxHR SQ (video) y PCM 16-bit 48 kHz (audio).
 
-Cada pista de audio original se separa en **dos pistas mono**:
-- Si la pista es mono: se duplica el mismo canal.
-- Si es estéreo o multicanal: se extraen el canal izquierdo (c0) y derecho (c1) como pistas mono independientes.
+se toma el audio del video y da a elegir entre **5 modos de audio**(cada pista es un archivo de audio independiente:
+- duplicar la cantidad de pistas en mono (1 pista = 1 pista mono solo con audio izquerda + 1 pista mono solo con audio derecha) 
+- pistas mono
+- pistas stereo
+- comprimir audio en una pista mono
+- comprimir audio en una pista stereo
 
 Este comportamiento evita problemas de reconocimiento de audio en DaVinci Resolve,  
 que en Linux solo acepta ciertos formatos y no maneja bien pistas estéreo o multicanal en contenedores como MP4/MKV.
