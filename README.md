@@ -67,6 +67,7 @@ ffmpeg -h encoder=dnxhd
 ```
 Si no muestra información, es posible que necesites compilar `ffmpeg` desde el código fuente.  
 Consulta la guía oficial: [FFmpeg Compilation Guide](https://trac.ffmpeg.org/wiki/CompilationGuide)
+ > Si la página no carga, desactiva temporalmente extensiones de privacidad (como JShelter o uBlock Origin) para este dominio. El sitio usa una protección anti-bot llamada Anubis que requiere JavaScript moderno.
 
 Nota: El sitio puede requerir resolver un reto anti-bot (Anubis) al acceder desde ciertos entornos automatizados.
 
