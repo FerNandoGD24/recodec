@@ -24,7 +24,7 @@ update_cpu_cores
 NICE_LEVEL=10
 set -e
 
-# === NUEVO: Función para detectar extensiones válidas ===
+# === Función para detectar extensiones válidas ===
 is_valid_video_ext() {
     local file="$1"
     local ext="${file##*.}"
@@ -40,7 +40,7 @@ is_valid_video_ext() {
     esac
 }
 
-# === NUEVO: Progreso aproximado (spinner) ===
+# === Progreso aproximado (spinner) ===
 show_approximate_progress() {
     local message="$1"
     local pid_file="$2"
@@ -54,12 +54,13 @@ show_approximate_progress() {
     printf "\b \n"
 }
 
-# === NUEVO: Detectar pistas de audio vacías ===
+# === CORREGIDO: Detectar pistas de audio vacías ===
 is_audio_track_silent() {
     local input_file="$1"
     local track_index="$2"
     local duration_sec
-    local rms_db
+    local rms_line
+    local rms_value
 
     duration_sec=$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$input_file" 2>/dev/null)
     if [[ -z "$duration_sec" || "$duration_sec" == "N/A" ]]; then
@@ -68,21 +69,33 @@ is_audio_track_silent() {
         duration_sec=$(awk 'BEGIN{print ('$duration_sec' > 30) ? 30 : '$duration_sec'}')
     fi
 
-    rms_db=$(ffmpeg -nostdin -hide_banner -i "$input_file" \
+    rms_line=$(ffmpeg -nostdin -hide_banner -i "$input_file" \
         -map "0:a:$track_index" \
         -t "$duration_sec" \
         -af "astats=metadata=1:reset=1,ametadata=mode=print:key=lavfi.astats.1.RMS_level:file=-" \
         -f null - 2>/dev/null | tail -n1)
 
-    if [[ -z "$rms_db" ]]; then
+    if [[ -z "$rms_line" ]]; then
         return 1  # asumimos que hay audio
     fi
 
-    if [[ "$rms_db" == "-inf" ]]; then
-        return 0  # silencio total
+    # Extraer solo el valor numérico o "-inf"
+    rms_value=$(echo "$rms_line" | sed -n 's/.*=\([0-9.-]*\)/\1/p')
+
+    if [[ -z "$rms_value" ]]; then
+        if [[ "$rms_line" == *"-inf"* ]]; then
+            return 0  # silencio total
+        else
+            return 1
+        fi
     fi
 
-    if awk "BEGIN {exit ($rms_db < -55) ? 0 : 1}"; then
+    if [[ "$rms_value" == "-inf" ]]; then
+        return 0
+    fi
+
+    # Comparar valor numérico
+    if awk "BEGIN {exit ($rms_value < -55) ? 0 : 1}"; then
         return 0
     else
         return 1
@@ -153,7 +166,7 @@ show_percent() {
 
 # Ejecución de ffmpeg
 run_ffmpeg_limited() {
-    nice -n "$NICE_LEVEL" taskset -c "$CPU_CORES" ionice -c 2 -n 7 ffmpeg "$@"
+    nice -n "$NICE_LEVEL" taskset -c "$CPU_CORES" ionice -c 2 -n 7 ffmpeg -hide_banner -loglevel error "$@"
 }
 
 run_ffmpeg_with_progress() {
@@ -163,24 +176,24 @@ run_ffmpeg_with_progress() {
     } | show_percent "$input"
 }
 
-# Funciones auxiliares
-get_audio_track_count() {
-    ffprobe -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$1" 2>/dev/null | wc -l
-}
-
-# === NUEVO: Función para ejecutar ffmpeg con spinner si no hay progreso real ===
+# === CORREGIDO: Ejecutar ffmpeg con spinner sin exec ===
 run_ffmpeg_with_spinner() {
     local desc="$1"; shift
     local tmp_pid="/tmp/ffmpeg_$$"
     (
         echo $BASHPID > "$tmp_pid"
-        exec run_ffmpeg_limited -hide_banner -loglevel error "$@"
+        run_ffmpeg_limited "$@"
     ) &
     show_approximate_progress "$desc" "$tmp_pid"
     wait $!
     local ret=$?
     rm -f "$tmp_pid"
     return $ret
+}
+
+# Funciones auxiliares
+get_audio_track_count() {
+    ffprobe -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$1" 2>/dev/null | wc -l
 }
 
 # Exportación
@@ -219,7 +232,6 @@ export_file() {
                 local audio_output="$DIR/${BASENAME}_audio_all_${suffix}.wav"
                 echo "  -> Audio mezclado ($suffix): $audio_output"
 
-                # Filtrar solo pistas no vacías
                 non_silent_tracks=()
                 for ((i=0; i<audio_tracks; i++)); do
                     if ! is_audio_track_silent "$INPUT" "$i"; then
@@ -235,7 +247,6 @@ export_file() {
                         map_args+=("-map" "0:a:$idx")
                     done
                     if [ ${#non_silent_tracks[@]} -eq 1 ]; then
-                        # Solo una pista: no usar amix
                         if ! run_ffmpeg_with_spinner "Mezclando audio" -i "$INPUT" "${map_args[@]}" -ac $ac -c:a pcm_s16le -ar 48000 -y "$audio_output"; then
                             echo "    Error al mezclar audio"
                         fi
