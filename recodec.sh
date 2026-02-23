@@ -24,6 +24,12 @@ update_cpu_cores
 NICE_LEVEL=10
 set -e
 
+# Modos predeterminados
+VIDEO_MODE=2
+AUDIO_MODE=3
+FPS_MODE=2
+HDR_MODE=0  # 0=Off, 1=On (HDR→SDR Tone Mapping)
+
 # === Función para detectar extensiones válidas ===
 is_valid_video_ext() {
     local file="$1"
@@ -54,7 +60,7 @@ show_approximate_progress() {
     printf "\b \n"
 }
 
-# === CORREGIDO: Detectar pistas de audio vacías ===
+# === Detectar pistas de audio vacías ===
 is_audio_track_silent() {
     local input_file="$1"
     local track_index="$2"
@@ -76,15 +82,14 @@ is_audio_track_silent() {
         -f null - 2>/dev/null | tail -n1)
 
     if [[ -z "$rms_line" ]]; then
-        return 1  # asumimos que hay audio
+        return 1
     fi
 
-    # Extraer solo el valor numérico o "-inf"
     rms_value=$(echo "$rms_line" | sed -n 's/.*=\([0-9.-]*\)/\1/p')
 
     if [[ -z "$rms_value" ]]; then
         if [[ "$rms_line" == *"-inf"* ]]; then
-            return 0  # silencio total
+            return 0
         else
             return 1
         fi
@@ -94,7 +99,6 @@ is_audio_track_silent() {
         return 0
     fi
 
-    # Comparar valor numérico
     if awk "BEGIN {exit ($rms_value < -55) ? 0 : 1}"; then
         return 0
     else
@@ -127,11 +131,6 @@ if [ ${#valid_files[@]} -eq 0 ]; then
     echo "No se encontraron archivos de video soportados para procesar."
     exit 0
 fi
-
-# Modos predeterminados
-VIDEO_MODE=2
-AUDIO_MODE=3
-FPS_MODE=2
 
 # Progreso para codificación (con -progress)
 show_percent() {
@@ -176,7 +175,6 @@ run_ffmpeg_with_progress() {
     } | show_percent "$input"
 }
 
-# === CORREGIDO: Ejecutar ffmpeg con spinner sin exec ===
 run_ffmpeg_with_spinner() {
     local desc="$1"; shift
     local tmp_pid="/tmp/ffmpeg_$$"
@@ -416,7 +414,18 @@ process_file() {
 
     echo -n "  Codificando video sin audio... "
 
-    if [ "$VIDEO_MODE" -eq 1 ]; then
+    if [ "$HDR_MODE" -eq 1 ]; then
+        # Conversión HDR→SDR con tone mapping
+        if run_ffmpeg_with_progress "$INPUT" -i "$INPUT" \
+            -vf "zscale=transfer=linear:primaries=bt2020:matrix=bt2020nc,tonemap=hable:desat=0:peak=100,zscale=transfer=bt709:primaries=bt709:matrix=bt709,eq=contrast=1.1:brightness=-0.05" \
+            $fps_opt -c:v libx264 -crf 15 -preset slow -an -f mov -y "$OUTPUT"; then
+            echo "OK (HDR→SDR)"
+        else
+            echo "Error"
+            for f in "${extracted_audio[@]}"; do rm -f "$f"; done
+            return 1
+        fi
+    elif [ "$VIDEO_MODE" -eq 1 ]; then
         if run_ffmpeg_with_spinner "Copiando video" -i "$INPUT" -c:v copy $fps_opt -an -f mov -y "$OUTPUT"; then
             echo "OK (copiado)"
         else
@@ -461,6 +470,10 @@ while true; do
         1) echo "Fotogramas     : 60 fps" ;;
         2) echo "Fotogramas     : 30 fps" ;;
     esac
+    case $HDR_MODE in
+        0) echo "HDR→SDR        : Desactivado" ;;
+        1) echo "HDR→SDR        : Activado (tone mapping Hable)" ;;
+    esac
     echo "Nucleos usados : $TARGET_THREADS (de $TOTAL_THREADS disponibles)"
     echo
     echo "1) Cambiar codec de video"
@@ -469,9 +482,10 @@ while true; do
     echo "4) Configurar numero de nucleos"
     echo "5) Iniciar procesamiento"
     echo "6) Exportar (solo video, solo audio o todo)"
-    echo "7) Salir"
+    echo "7) Configurar conversion HDR→SDR"
+    echo "8) Salir"
     echo
-    read -p "Selecciona una opcion [1-7]: " opt
+    read -p "Selecciona una opcion [1-8]: " opt
     case $opt in
         1)
             echo
@@ -540,7 +554,18 @@ while true; do
                 read -p "Presiona Enter para regresar al menu..."
             fi
             ;;
-        7) exit 0 ;;
+        7)
+            echo
+            echo "Conversion HDR a SDR con tone mapping:"
+            echo "0) Desactivado (procesamiento normal)"
+            echo "1) Activado (convierte HDR→SDR preservando colores)"
+            echo
+            echo "Nota: Esta opcion usa tone mapping Hable para preservar"
+            echo "la intencion artistica del HDR en espacio SDR."
+            read -p "Elige una opcion [0-1]: " m
+            if [[ "$m" == "0" || "$m" == "1" ]]; then HDR_MODE=$m; fi
+            ;;
+        8) exit 0 ;;
         *) sleep 0 ;;
     esac
 done
@@ -666,7 +691,9 @@ echo "Cada video procesado tiene su propia carpeta '${BASENAME}_output/' con:"
 echo "  - Video convertido (.mov)"
 echo "  - Archivos de audio (.wav) según modo seleccionado"
 echo "  - Original archivado en 'original/'"
-if [ "$VIDEO_MODE" -eq 2 ]; then
+if [ "$HDR_MODE" -eq 1 ]; then
+    echo "Video convertido de HDR a SDR con tone mapping Hable."
+elif [ "$VIDEO_MODE" -eq 2 ]; then
     echo "Video convertido a DNxHR-SQ."
 else
     echo "Video copiado sin cambios de codec."
