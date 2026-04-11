@@ -27,7 +27,7 @@ set -e
 # Modos predeterminados
 VIDEO_MODE=2
 AUDIO_MODE=3
-FPS_MODE=2
+FPS_MODE=1
 HDR_MODE=0  # 0=Off, 1=On (HDR→SDR Tone Mapping)
 
 # === Función para detectar extensiones válidas ===
@@ -61,49 +61,75 @@ show_approximate_progress() {
 }
 
 # === Detectar pistas de audio vacías ===
+# Escanea el video en chunks de 60s hasta el 25% de la duración total.
+# En cuanto encuentra audio en un chunk, acepta la pista inmediatamente.
+# Solo marca como silencio si TODOS los chunks analizados dan -inf o < -70 dB.
 is_audio_track_silent() {
     local input_file="$1"
     local track_index="$2"
-    local duration_sec
+    local chunk_size=60   # segundos por chunk
+    local total_dur
+    local scan_limit
+    local offset=0
     local rms_line
     local rms_value
 
-    duration_sec=$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$input_file" 2>/dev/null)
-    if [[ -z "$duration_sec" || "$duration_sec" == "N/A" ]]; then
-        duration_sec=30
-    else
-        duration_sec=$(awk 'BEGIN{print ('$duration_sec' > 30) ? 30 : '$duration_sec'}')
+    total_dur=$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$input_file" 2>/dev/null)
+    if [[ -z "$total_dur" || "$total_dur" == "N/A" ]]; then
+        # Sin duración conocida: analizar un solo chunk de 60s al inicio
+        total_dur=240
     fi
 
-    rms_line=$(ffmpeg -nostdin -hide_banner -i "$input_file" \
-        -map "0:a:$track_index" \
-        -t "$duration_sec" \
-        -af "astats=metadata=1:reset=1,ametadata=mode=print:key=lavfi.astats.1.RMS_level:file=-" \
-        -f null - 2>/dev/null | tail -n1)
+    # Límite de escaneo: 25% de la duración total, mínimo 60s
+    scan_limit=$(awk "BEGIN {
+        limit = $total_dur * 0.25
+        print (limit < 60) ? 60 : limit
+    }")
 
-    if [[ -z "$rms_line" ]]; then
-        return 1
-    fi
+    while awk "BEGIN {exit ($offset < $scan_limit) ? 0 : 1}"; do
+        rms_line=$(ffmpeg -nostdin -hide_banner -i "$input_file" \
+            -map "0:a:$track_index" \
+            -ss "$offset" -t "$chunk_size" \
+            -af "astats=metadata=1:reset=1,ametadata=mode=print:key=lavfi.astats.Overall.RMS_level:file=-" \
+            -f null - 2>/dev/null | grep "lavfi.astats.Overall.RMS_level" | tail -n1)
 
-    rms_value=$(echo "$rms_line" | sed -n 's/.*=\([0-9.-]*\)/\1/p')
-
-    if [[ -z "$rms_value" ]]; then
-        if [[ "$rms_line" == *"-inf"* ]]; then
-            return 0
-        else
+        if [[ -z "$rms_line" ]]; then
+            # No se pudo leer este chunk: asumir que tiene audio
             return 1
         fi
-    fi
 
-    if [[ "$rms_value" == "-inf" ]]; then
-        return 0
-    fi
+        rms_value=$(echo "$rms_line" | sed -n 's/.*=\([0-9.-]*\)/\1/p')
 
-    if awk "BEGIN {exit ($rms_value < -55) ? 0 : 1}"; then
-        return 0
-    else
-        return 1
-    fi
+        if [[ -z "$rms_value" ]]; then
+            if [[ "$rms_line" == *"-inf"* ]]; then
+                # Chunk mudo, continuar al siguiente
+                offset=$(awk "BEGIN {print $offset + $chunk_size}")
+                continue
+            else
+                # Valor inesperado: asumir audio presente
+                return 1
+            fi
+        fi
+
+        if [[ "$rms_value" == "-inf" ]]; then
+            # Chunk mudo, continuar al siguiente
+            offset=$(awk "BEGIN {print $offset + $chunk_size}")
+            continue
+        fi
+
+        # Tiene valor numérico: comprobar umbral -70 dB
+        if awk "BEGIN {exit ($rms_value < -70) ? 0 : 1}"; then
+            # Chunk muy silencioso, continuar al siguiente
+            offset=$(awk "BEGIN {print $offset + $chunk_size}")
+            continue
+        else
+            # ¡Audio encontrado! Aceptar pista inmediatamente
+            return 1
+        fi
+    done
+
+    # Se analizó hasta el 25% y todo fue silencio
+    return 0
 }
 
 # Detección de archivos
