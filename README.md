@@ -1,113 +1,28 @@
-# 🎬 recodec.sh
+# Script de preparación de video para DaVinci Resolve
 
-Script de bash para recodificación y exportación de archivos de video usando **FFmpeg**. Diseñado para preparar material de video para edición profesional, con soporte para múltiples formatos, modos de audio configurables, conversión HDR→SDR y uso controlado de recursos del sistema.
+## Descripción
+Script de bash que prepara archivos de video para su importación en DaVinci Resolve. Reempaqueta el material a contenedor `.mov`, mantiene el códec de video original, extrae cada pista de audio a un archivo `.wav` independiente (PCM 16 bit, 48 kHz, estéreo) y archiva los archivos originales en una subcarpeta de respaldo.
 
----
+## Propósito
+Estandarizar la estructura de los archivos de entrada para DaVinci Resolve. La separación de video y audio en contenedores `.mov` y `.wav` facilita la gestión en la línea de tiempo y reduce errores de decodificación o sincronización frecuentes en entornos Linux. El script prioriza la copia directa del flujo de video para evitar generaciones de compresión adicionales.
 
-## ✨ Características
+## Dependencias
+- `bash`
+- `ffmpeg` y `ffprobe`
+- `coreutils` (`awk`, `nice`, `taskset`, `ionice`, `seq`)
+- Utilidades estándar: `find`, `sort`, `date`
 
-- **Recodificación a DNxHR-SQ** o copia directa del codec original
-- **Extracción de audio** en múltiples modos (mono, stereo, por canal, mezclado)
-- **Detección automática de pistas de audio silenciosas** para evitar exportar pistas vacías
-- **Conversión HDR → SDR** con tone mapping Hable
-- **Control de FPS** de salida (30 o 60 fps)
-- **Uso eficiente de CPU**: limita hilos y prioridad del proceso (`nice`, `taskset`, `ionice`)
-- **Reintento automático** en caso de error durante el procesamiento
-- **Verificación de integridad** del archivo de salida
-- **Menú interactivo** para configurar todas las opciones antes de procesar
-- Procesamiento por **lote** (todos los videos del directorio actual) o por **archivos individuales**
+## Integración de FFmpeg en DaVinci Resolve (Linux)
+La versión oficial de DaVinci Resolve para Linux no incluye FFmpeg en su instalación base. Para ampliar la compatibilidad de decodificación, debes integrar las bibliotecas de FFmpeg del sistema:
 
----
+- **Arch Linux / Manjaro (AUR):** Instala `davinci-resolve` o `davinci-resolve-studio`. Los paquetes del AUR suelen incluir hooks o instrucciones para enlazar las bibliotecas de `ffmpeg` del sistema con el directorio de Resolve.
+- **Ubuntu / Debian:** Instala `ffmpeg` desde los repositorios oficiales. Crea enlaces simbólicos de `libavcodec.so`, `libavformat.so`, `libavutil.so`, etc., en `/opt/resolve/libs/`, o copia los binarios `ffmpeg` y `ffprobe` en `/opt/resolve/bin/`.
+- **Fedora / openSUSE / Otras:** Instala FFmpeg mediante el gestor de paquetes correspondiente. Luego, exporta `LD_LIBRARY_PATH` apuntando a las rutas de las bibliotecas de FFmpeg antes de ejecutar Resolve, o modifica el script de lanzamiento de Resolve para incluir `LD_PRELOAD` con las bibliotecas del sistema.
 
-## 📋 Requisitos
+Consulta la documentación de Blackmagic Design para verificar la estructura exacta de directorios según tu versión.
 
-- **Bash** 4.0 o superior
-- **FFmpeg** y **FFprobe** instalados y disponibles en el `PATH`
-- `taskset` (parte de `util-linux`)
-- `ionice` (parte de `util-linux`)
-- `nproc`
-
-En sistemas Debian/Ubuntu:
+## Uso
+Ejecuta el script desde la terminal. Puedes pasar rutas de archivos como argumentos o dejar que detecte automáticamente los videos compatibles en el directorio actual.
 
 ```bash
-sudo apt install ffmpeg util-linux
-```
-
----
-
-## 🚀 Uso
-
-### Procesar todos los videos del directorio actual
-
-```bash
-bash recodec.sh
-```
-
-### Procesar archivos específicos
-
-```bash
-bash recodec.sh video1.mp4 video2.mkv
-```
-
-Al ejecutar el script, se abre un **menú interactivo** que permite configurar las opciones antes de iniciar el procesamiento.
-
----
-
-## ⚙️ Opciones del menú
-
-| Opción | Descripción |
-|--------|-------------|
-| **Codec de video** | Mantener el codec original (copia rápida) o recodificar a DNxHR-SQ |
-| **Modo de audio** | Ver tabla de modos abajo |
-| **Fotogramas por segundo** | 60 fps o 30 fps |
-| **Número de núcleos** | Ajusta cuántos núcleos de CPU usar (por defecto: 70% del total) |
-| **Exportar** | Extraer solo video, solo audio, o ambos sin recodificar el video |
-| **HDR → SDR** | Activa conversión con tone mapping Hable |
-
-### Modos de audio
-
-| Modo | Descripción | Ejemplo |
-|------|-------------|---------|
-| 1 | Separar en 2 pistas mono por canal | 4 canales → 8 archivos `.wav` |
-| 2 | Una pista mono por cada canal | 4 pistas stereo → 4 archivos mono |
-| 3 | Una pista stereo por cada pista (por defecto) | 4 pistas → 4 archivos stereo |
-| 4 | Mezclar todo a 1 archivo mono | N pistas → 1 `.wav` mono |
-| 5 | Mezclar todo a 1 archivo stereo | N pistas → 1 `.wav` stereo |
-
----
-
-## 📁 Estructura de salida
-
-Por cada archivo procesado se crea una carpeta `<nombre>_output/`:
-
-```
-video_output/
-├── video.mov                        # Video recodificado (sin audio)
-├── video_audio_track_0.wav          # Pista(s) de audio extraídas
-├── video_audio_track_1.wav
-└── original/
-    └── video.mp4                    # Archivo original archivado
-```
-
----
-
-## 🔧 Formatos de entrada soportados
-
-`mp4`, `mkv`, `mov`, `avi`, `mxf`, `m4v`, `ts`, `mts`, `m2ts`, `webm`, `flv`, `wmv`, `mpg`, `mpeg`, `vob`
-
----
-
-## 📝 Notas
-
-- El script usa `nice -n 10`, `taskset` e `ionice -c 2 -n 7` para no saturar el sistema durante el procesamiento.
-- La detección de pistas silenciosas analiza hasta el 25% de la duración del video en bloques de 60 segundos. Una pista se considera vacía si su nivel RMS es menor a **-70 dB** en todos los bloques analizados.
-- En caso de error, el script **reintenta automáticamente** y elimina archivos parciales antes de volver a intentarlo.
-- Al finalizar, se muestra un **resumen** con archivos procesados correctamente, tiempos y errores.
-
----
-
-## 📄 Licencia
-
-MIT — libre para usar, modificar y distribuir.
-
-sientete libre de modificarlo para complir con tus exigencias
+./script.sh [archivo1.mp4 archivo2.mkv ...]
