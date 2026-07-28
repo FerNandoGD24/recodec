@@ -1,104 +1,87 @@
 #!/bin/bash
+set -euo pipefail
 
-TOTAL_THREADS=$(nproc)
-TARGET_THREADS=$(( TOTAL_THREADS / 2 ))
-[ "$TARGET_THREADS" -lt 1 ] && TARGET_THREADS=1
-CPU_CORES=$(seq -s, 0 $((TARGET_THREADS - 1)))
+# --- Config ---
+INPUT_DIR="${1:-.}"
+OUTPUT_DIR="output"
+VIDEO_DIR="$OUTPUT_DIR/video"
+AUDIO_DIR="$OUTPUT_DIR/audio"
+VIDEO_EXTS="mp4|mkv|avi|m4v|webm|flv|wmv|ts|m2ts|mts|mov"
+AUDIO_EXTS="mp3|aac|flac|ogg|wma|m4a|opus|wav"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+mkdir -p "$VIDEO_DIR/audio" "$VIDEO_DIR/originals"
+mkdir -p "$AUDIO_DIR/originals"
 
-is_valid_video_ext() {
-    local ext="${1##*.}"
-    ext="${ext,,}"
-    case "$ext" in
-        mp4|mkv|mov|avi|mxf|m4v|ts|mts|m2ts|webm|flv|wmv|mpg|mpeg|vob) return 0 ;;
-        *) return 1 ;;
-    esac
-}
+is_video() { echo "${1##*.}" | grep -qiE "^($VIDEO_EXTS)$"; }
+is_audio() { echo "${1##*.}" | grep -qiE "^($AUDIO_EXTS)$"; }
 
-run_ffmpeg() {
-    nice -n 10 taskset -c "$CPU_CORES" ionice -c 2 -n 7 ffmpeg -hide_banner -loglevel error "$@"
-}
+# --- Videos ---
+for file in "$INPUT_DIR"/*; do
+  [[ -f "$file" ]] || continue
+  fname=$(basename "$file")
+  name="${fname%.*}"
+  is_video "$fname" || continue
 
-run_with_spinner() {
-    local desc="$1"; shift
-    local spinner=('|' '/' '-' '\\') i=0
-    printf "%s... " "$desc"
-    run_ffmpeg "$@" &
-    local pid=$!
-    while kill -0 $pid 2>/dev/null; do
-        printf "\r%s %s" "$desc" "${spinner[i++ % 4]}"
-        sleep 0.25
+  echo "Video: $fname"
+
+  # Original
+  mv "$file" "$VIDEO_DIR/originals/"
+  src="$VIDEO_DIR/originals/$fname"
+
+  # Recode to ProRes 422 HQ
+  ffmpeg -y -i "$src" \
+    -c:v prores_ks -profile:v 3 -pix_fmt yuv422p10le \
+    -an \
+    "$VIDEO_DIR/${name}.mov" \
+    -loglevel warning
+
+  # Extract each audio track to WAV stereo 24-bit
+  mapfile -t streams < <(
+    ffprobe -v error -select_streams a \
+      -show_entries stream=index -of csv=p=0 "$src"
+  )
+
+  if [[ ${#streams[@]} -eq 0 ]]; then
+    echo "  No audio tracks found"
+  else
+    t=1
+    for idx in "${streams[@]}"; do
+      ffmpeg -y -i "$src" \
+        -map 0:"$idx" -ac 2 -c:a pcm_s24le \
+        "$VIDEO_DIR/audio/${name}_track${t}.wav" \
+        -loglevel warning
+      echo "  Track $t extracted"
+      ((t++))
     done
-    wait $pid 2>/dev/null
-    local ret=$?
-    printf "\r%s %s\n" "$desc" "${spinner[i % 4]}"
-    return $ret
-}
-
-valid_files=()
-if [ $# -gt 0 ]; then
-    for arg in "$@"; do
-        [ -f "$arg" ] && is_valid_video_ext "$arg" && valid_files+=("$arg")
-    done
-else
-    echo "Buscando videos en el directorio actual..."
-    while IFS= read -r -d '' file; do
-        valid_files+=("$file")
-    done < <(find . -maxdepth 1 -type f \( \
-        -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.avi" -o \
-        -iname "*.mxf" -o -iname "*.m4v" -o -iname "*.ts" -o -iname "*.mts" -o \
-        -iname "*.m2ts" -o -iname "*.webm" -o -iname "*.flv" -o -iname "*.wmv" -o \
-        -iname "*.mpg" -o -iname "*.mpeg" -o -iname "*.vob" \) -print0 | sort -z)
-fi
-
-[ ${#valid_files[@]} -eq 0 ] && { echo "No se encontraron archivos soportados."; exit 0; }
-
-successful=()
-failed=()
-
-for input in "${valid_files[@]}"; do
-    dir="$(dirname "$input")"
-    base="$(basename "$input")"
-    name="${base%.*}"
-    out_dir="$dir/${name}_output"
-    mkdir -p "$out_dir/original"
-    output_file="$out_dir/${name}.mov"
-
-    echo -e "\n${GREEN}Procesando:${NC} $input"
-
-    [ -f "$output_file" ] && { echo "  Ya existe, saltando."; successful+=("$input"); continue; }
-
-    audio_count=$(ffprobe -v quiet -select_streams a -show_entries stream=index -of csv=p=0 "$input" 2>/dev/null | wc -l)
-    audio_extracted=()
-    for ((i=0; i<audio_count; i++)); do
-        audio_out="$out_dir/${name}_audio_track_${i}.wav"
-        echo "  Extrayendo pista $i (estéreo) -> $(basename "$audio_out")"
-        if run_with_spinner "  Pista $i" -i "$input" -map "0:a:$i" -ac 2 -c:a pcm_s16le -ar 48000 -y "$audio_out"; then
-            audio_extracted+=("$audio_out")
-        else
-            echo -e "${RED}  Error al extraer pista $i${NC}"
-        fi
-    done
-
-    echo "  Copiando video -> $(basename "$output_file")"
-    if run_with_spinner "  Video" -i "$input" -c:v copy -an -f mov -y "$output_file"; then
-        mv "$input" "$out_dir/original/" 2>/dev/null || true
-        echo -e "${GREEN}  Listo:${NC} ${#audio_extracted[@]} pista(s) de audio y video guardados."
-        successful+=("$input")
-    else
-        echo -e "${RED}  Error al copiar video. Abortando.${NC}"
-        rm -f "$output_file" "${audio_extracted[@]}" 2>/dev/null || true
-        failed+=("$input")
-    fi
+  fi
 done
 
-echo -e "\n${GREEN}=== Resumen ===${NC}"
-echo "Exitosos: ${#successful[@]}"
-if [ ${#failed[@]} -gt 0 ]; then
-    echo -e "${RED}Fallidos: ${#failed[@]}${NC}"
-    for f in "${failed[@]}"; do echo "  - $f"; done
-fi
+# --- Audio files ---
+for file in "$INPUT_DIR"/*; do
+  [[ -f "$file" ]] || continue
+  fname=$(basename "$file")
+  name="${fname%.*}"
+  is_audio "$fname" || continue
+
+  # Skip WAV files already in correct folder
+  [[ "$fname" == *.wav ]] && continue
+
+  echo "Audio: $fname"
+
+  mv "$file" "$AUDIO_DIR/originals/"
+  ffmpeg -y -i "$AUDIO_DIR/originals/$fname" \
+    -ac 2 -c:a pcm_s24le \
+    "$AUDIO_DIR/${name}.wav" \
+    -loglevel warning
+done
+
+echo ""
+echo "Done. Output structure:"
+echo "  $VIDEO_DIR/"
+echo "    ├── *.mov          (ProRes 422 HQ)"
+echo "    ├── audio/"
+echo "    │   └── *_trackN.wav"
+echo "    └── originals/"
+echo "  $AUDIO_DIR/"
+echo "    ├── *.wav"
+echo "    └── originals/"
