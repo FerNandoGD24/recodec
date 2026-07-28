@@ -1,28 +1,111 @@
-# Script de preparación de video para DaVinci Resolve
+# Media Converter - ProRes 422 HQ & WAV
 
-## Descripción
-Script de bash que prepara archivos de video para su importación en DaVinci Resolve. Reempaqueta el material a contenedor `.mov`, mantiene el códec de video original, extrae cada pista de audio a un archivo `.wav` independiente (PCM 16 bit, 48 kHz, estéreo) y archiva los archivos originales en una subcarpeta de respaldo.
+Convierte videos a ProRes 422 HQ y audios a WAV estéreo 24-bit, optimizado para DaVinci Resolve.
 
-## Propósito
-Estandarizar la estructura de los archivos de entrada para DaVinci Resolve. La separación de video y audio en contenedores `.mov` y `.wav` facilita la gestión en la línea de tiempo y reduce errores de decodificación o sincronización frecuentes en entornos Linux. El script prioriza la copia directa del flujo de video para evitar generaciones de compresión adicionales.
+## Requisitos
 
-## Dependencias
-- `bash`
-- `ffmpeg` y `ffprobe`
-- `coreutils` (`awk`, `nice`, `taskset`, `ionice`, `seq`)
-- Utilidades estándar: `find`, `sort`, `date`
-
-## Integración de FFmpeg en DaVinci Resolve (Linux)
-La versión oficial de DaVinci Resolve para Linux no incluye FFmpeg en su instalación base. Para ampliar la compatibilidad de decodificación, debes integrar las bibliotecas de FFmpeg del sistema:
-
-- **Arch Linux / Manjaro (AUR):** Instala `davinci-resolve` o `davinci-resolve-studio`. Los paquetes del AUR suelen incluir hooks o instrucciones para enlazar las bibliotecas de `ffmpeg` del sistema con el directorio de Resolve.
-- **Ubuntu / Debian:** Instala `ffmpeg` desde los repositorios oficiales. Crea enlaces simbólicos de `libavcodec.so`, `libavformat.so`, `libavutil.so`, etc., en `/opt/resolve/libs/`, o copia los binarios `ffmpeg` y `ffprobe` en `/opt/resolve/bin/`.
-- **Fedora / openSUSE / Otras:** Instala FFmpeg mediante el gestor de paquetes correspondiente. Luego, exporta `LD_LIBRARY_PATH` apuntando a las rutas de las bibliotecas de FFmpeg antes de ejecutar Resolve, o modifica el script de lanzamiento de Resolve para incluir `LD_PRELOAD` con las bibliotecas del sistema.
-
-Consulta la documentación de Blackmagic Design para verificar la estructura exacta de directorios según tu versión.
+- `ffmpeg`
+- `ffprobe`
 
 ## Uso
-Ejecuta el script desde la terminal. Puedes pasar rutas de archivos como argumentos o dejar que detecte automáticamente los videos compatibles en el directorio actual.
 
 ```bash
-./script.sh [archivo1.mp4 archivo2.mkv ...]
+./convert_media.sh [carpeta_entrada] [carpeta_salida_default]
+```
+
+### Ejemplos
+
+Procesar carpeta actual:
+```bash
+./recodec.sh
+```
+
+Procesar carpeta específica:
+```bash
+./recodec.sh /ruta/videos
+```
+
+## Formatos soportados
+
+### Video
+mp4, mkv, avi, m4v, webm, flv, wmv, ts, m2ts, mts, mov
+
+### Audio
+mp3, aac, flac, ogg, wma, m4a, opus, wav
+
+## Características
+
+- Conversión de videos a **ProRes 422 HQ** (10-bit yuv422p10le)
+- Extracción automática de todas las pistas de audio como **WAV estéreo 24-bit**
+- Conserva archivos originales en carpeta `originals/`
+- Salida optimizada para DaVinci Resolve
+- Procesamiento por lotes
+
+## Estructura de salida
+
+```
+output/
+├── video/
+│   ├── *.mov                (ProRes 422 HQ)
+│   ├── audio/
+│   │   └── *_trackN.wav     (Pistas de audio extraídas)
+│   └── originals/           (Videos originales)
+└── audio/
+    ├── *.wav                (Audios convertidos)
+    └── originals/           (Audios originales)
+```
+
+## Codecs utilizados
+
+| Tipo | Codec | Perfil | Formato píxel | Tasa muestreo | Profundidad |
+|------|-------|--------|---------------|---------------|------------|
+| Video | ProRes | 422 HQ (3) | yuv422p10le | - | 10-bit |
+| Audio | PCM | - | - | 48000 Hz | 24-bit |
+
+## Configuración
+
+Edita las variables al inicio del script:
+
+```bash
+INPUT_DIR="${1:-.}"           # Carpeta entrada (argumento 1)
+OUTPUT_DIR="output"           # Carpeta salida
+VIDEO_DIR="$OUTPUT_DIR/video" # Salida videos
+AUDIO_DIR="$OUTPUT_DIR/audio" # Salida audios
+```
+
+## Compatibilidad
+
+- DaVinci Resolve: Totalmente compatible
+- Final Cut Pro: Compatible
+- Adobe Premiere: Compatible
+
+## Notas
+
+- Los archivos originales se mueven a la carpeta `originals/`
+- Los WAV ya existentes en la entrada se saltan
+- El script registra cada operación completada
+- Usa `-loglevel warning` para minimizar output de ffmpeg
+
+## Solución de problemas
+
+### ffmpeg: comando no encontrado
+```bash
+sudo apt install ffmpeg  # Ubuntu/Debian
+brew install ffmpeg      # macOS
+```
+
+### Permisos denegados
+```bash
+chmod +x convert_media.sh
+```
+
+### Espacio en disco insuficiente
+Asegúrate de tener espacio libre para los videos procesados (aprox. 2x el tamaño original)
+
+## Licencia
+
+MIT
+
+## Autor
+
+Conversión de medios optimizada para post-producción
